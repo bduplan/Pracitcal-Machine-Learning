@@ -1,0 +1,189 @@
+---
+title: "Quantified-Self Prediction Project"
+author: "Bernie Duplan"
+date: "8/31/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setoptions}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+```{r Load Libraries}
+## Load Libraries and Initialize Multi-Core Computing
+library(ggplot2, quietly=TRUE)
+library(caret, quietly=TRUE)
+library(iterators, quietly=TRUE)
+library(parallel, quietly=TRUE)
+library(foreach, quietly=TRUE)
+library(doParallel, quietly=TRUE)
+library(randomForest, quietly=TRUE)
+cluster <- makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+```
+
+## Executive Summary
+Data from the [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201) were used to build a random forest classification model to predect the classification of 20 unknown observations.  The model which included two variables at each split achieved an accuracy of 99.97% on the training data and 99.25% on the test data.
+
+## Background
+
+With the advent of wearable health-monitoring technology such as Fitbit, it is now possible to easily and inexpensively collect large amounts of data about personal activity.  These devices generally tell the user how much of an activity they have done (i.e. total steps) but not how well they have done a given activity.  
+
+For this project, inertial measurement units (IMU's) were placed on the wasteband, forearm, and dumbbell of six test subjects and they were asked to perform a weight lifting exercise.  The subjects were asked to perform the weight lifting in each of five ways, with only one way being the "correct" form and the remainder being common mistakes.  The ways in which the dumbell was curled was represented in the data by the "classe".  
+
+The goal of this project is to correctly predict the classes of 20 unknown observations.
+
+## Exploratory Data Analysis
+
+The data were imported to R and the structure of the dataset was observed with the R str() function.
+
+```{r Import, results = "hide"}
+library(ggplot2, quietly=TRUE)
+library(caret, quietly=TRUE)
+library(iterators, quietly=TRUE)
+library(parallel, quietly=TRUE)
+library(foreach, quietly=TRUE)
+library(doParallel, quietly=TRUE)
+library(randomForest, quietly=TRUE)
+cluster <- makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+
+setwd("C:/Users/bdupl/Documents/R/8 Practical Machine Learning/Project")
+
+trainURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+trainDestFile <- "pml-training.csv"
+valURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+valDestFile <- "pml-testing.csv"
+
+if (!file.exists(trainDestFile)){
+    download.file(trainURL, trainDestFile)
+}
+if (!file.exists(valDestFile)){
+    download.file(valURL, valDestFile)
+}
+
+## Import CSV Data
+training <- read.csv("pml-training.csv")
+validation <- read.csv("pml-testing.csv")
+
+str(training)
+```
+
+There were 19,622 observations of 160 variables.  A quick look at the structure shows that several of the variables are missing many values.  Variables that were missing >80% of their values were omitted from the prediction model development, as imputing their values would not be very meaningful.  The remaining variables had no missing values.  Furthermore, several of the variables were not believed to be related to the classe of the activity performed, and they were removed as well.  Finally, many variables were imported as factor variables with many factors, each correlating to observations of continuous numeric values.  These factor variables were converted to numeric data.
+
+```{r Remove Missing Values}
+## Remove columns that are heavily NA in either training or testing data
+propNA <- function(x){sum(is.na(x))/length(x)}
+propNA.train <- apply(training, 2, propNA)
+propNA.val <- apply(validation, 2, propNA)
+propNA.keep <- propNA.train < 0.80 & propNA.val < 0.8
+
+training <- training[, propNA.keep]
+validation <- validation[, propNA.keep]
+
+## Remove columns that are irrelevant
+irrel <- grep("time|_window|user_name", names(training))
+training <- training[, -irrel]
+training <- training[, -1] #Get rid of index ("X")
+
+## Convert factor variables to numeric
+facCol <- which(sapply(training, is.factor))
+facCol <- facCol[-length(facCol)] #Omit the classe factor from conversion
+training[, facCol] <- sapply(training[, facCol], as.numeric)
+```
+
+## Create Training, Testing, and Validation Datasets
+
+The training dataset was then divided up into a training and a testing dataset.  The classification models would be developed only on the training data and then tested for accuracy on the testing data.
+
+```{r Data Partition}
+## Breaking up training into training and testing
+set.seed(987)
+seltrain <- createDataPartition(y = training$classe, p = 0.6, list = FALSE)
+train <- training[seltrain, ]
+test <- training[-seltrain, ]
+```
+
+## Fit a Linear Discriminant Analysis Model
+
+An LDA model was fitted to the training data using K-fold cross validation.  Five folds were selected to cross validate the model and the final model was used to predict the classe of the training dataset.  The LDA model was only able to predict the classe of the training dataset with about a 70.6% accuracy.
+
+```{r LDA Model}
+## Fit an LDA model to the training data
+opts <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+LDAfit <- train(classe ~ ., data = train, method = "lda", trControl = opts)
+predLDA <- predict(LDAfit, train)
+confusionMatrix(predLDA, train$classe)
+```
+
+## Fit a Random Forest Model
+
+Next, a random forest model was fitted to the training data, again using K-fold cross validation with 5 folds.  The RF model was able to correctly identify the classe of the training data with 99.97% accuracy.  The model was then used to predict the classe of the testing dataset, resulting in 99.25% accuracy.  Based on the test data accuracy, the probability of correctly identifying all 20 unknown classes in the validation dataset would be 0.9925^20, or 86%.
+
+```{r RF Model}
+## Generate the model and calculate accuracy on training data
+opts <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+RFfit <- train(classe ~ ., data = train, method = "rf", trControl = opts)
+predRF_train <- predict(RFfit, train)
+confusionMatrix(predRF_train, train$classe)
+
+## Predict on the test dataset
+predRF_test <- predict(RFfit, test)
+confusionMatrix(predRF_test, test$classe)
+cmAccuracy <- confusionMatrix(predRF_test, test$classe)$overall["Accuracy"]
+
+## Calculate probablility of getting at least 16/20 correct (passing grade)
+p16.20 <- pbinom(15, size = 20, prob = cmAccuracy, lower.tail = FALSE)
+print(p16.20)
+```
+
+## Model Exploration
+
+The importance of each variable in the random forest decision tree was plotted to understand what metrics were most influential.  The number of predictors per split and the number of folds in the model were also plotted to demonstrate how simple the final model could be for embedded electronics or other products, requiring only 2 predictors at each split and as few as 30 or so folds.
+
+```{r Model Plots}
+## Plot the importance of each variable
+varImpPlot(RFfit$finalModel,
+           main="Variable Importance Plot: Random Forest",
+           type=2)
+
+plot(RFfit,
+     main = "Accuracy by Number of Predictors")
+
+plot(RFfit$finalModel,
+     main = "Accuracy by Number of Folds")
+```
+
+## Predict the Classe of the Validation Data
+
+Finally, the 20 unknown classes were predicted.
+
+```{r Predict Validation Classe}
+## Predict on the validation dataset
+predRF_val <- predict(RFfit, validation)
+print(predRF_val)
+
+stopCluster(cluster)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
